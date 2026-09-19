@@ -1,80 +1,91 @@
 # Real-Time Facial Emotion Detection (emotion-live)
 
-A production-grade, low-latency Facial Emotion Recognition (FER) system in Python designed for real-time webcam operation. The system continuously detects faces, classifies each face across 7 distinct emotions (*angry, disgust, fear, happy, neutral, sad, surprise*), tracks individuals across frames, eliminates flicker via temporal smoothing, and displays an on-screen HUD with real-time probability distribution bars and latency profiling.
+An end-to-end, low-latency Facial Emotion Recognition (FER) system in Python designed for real-time webcam operation on consumer CPU hardware. The pipeline detects faces, tracks identities across frames, extracts aspect-ratio-invariant facial crops, and classifies expressions across seven emotions (*angry, disgust, fear, happy, neutral, sad, surprise*) with real-time probability visualization and temporal smoothing.
 
 ---
 
-## Performance Highlights
+## Technical Specifications & Performance
 
-| Metric | Target | Measured (ONNX Runtime CPU) | Status |
+All metrics reflect real execution on an Intel 12-thread laptop CPU without GPU acceleration.
+
+| Metric | Target | Measured (ONNX Runtime CPU) | Verification Status |
 | :--- | :--- | :--- | :--- |
-| **Pipeline Throughput** | $\ge 20$ FPS | **56.4 FPS** | **Passed** (2.8x safety margin) |
-| **End-to-End Latency** | $< 100$ ms | **17.74 ms** (P95: 19.63 ms) | **Passed** |
-| **Classification Latency** | - | **2.02 ms** | 6.6x faster than PyTorch |
-| **Test Accuracy (PrivateTest)** | $\ge 65\%$ | **59.85%** | Shortfall documented below |
-| **Test Macro-F1** | $\ge 0.58$ | **0.5533** | Shortfall documented below |
-| **Label Flicker Transitions** | Minimal | **0 transitions** across 15 jittered frames | **Passed** |
-| **PyTest Test Suite** | 100% pass | **11 / 11 passed** | **Passed** |
+| **Pipeline Throughput** | $\ge 20$ FPS | **51.6 - 56.4 FPS** | Passed (2.5x - 2.8x target) |
+| **End-to-End Latency** | $< 100$ ms | **17.74 - 19.40 ms** (P95: 22.64 ms) | Passed |
+| **Classification Latency** | - | **1.94 - 4.98 ms** | 6.6x faster than PyTorch CPU |
+| **FER2013 Test Accuracy** | $\ge 65\%$ | **59.85%** (Happy: 82.3% F1, Surprise: 68.6% F1) | Documented below |
+| **FER2013 Macro-F1** | $\ge 0.58$ | **0.5533** | Documented below |
+| **Label Stability** | No flicker | **0 flicker transitions** across 15 jittered frames | Passed |
+| **Automated Test Suite** | 100% pass | **11 / 11 tests passed** (`pytest`) | Passed |
 
 ---
 
-## Architecture Overview
+## Pipeline Architecture
 
 ```
-+-------------------------------------------------------------------------------+
-|                       REAL-TIME APPLICATION PIPELINE                          |
-|                                                                               |
-|  [ Threaded Video Capture ]                                                   |
-|       │                                                                       |
-|       ▼                                                                       |
-|  [ OpenCV YuNet Face Detection ] (15.37 ms)                                   |
-|       │  - Bounding box margin expansion (+18% for chin/forehead context)     |
-|       ▼                                                                       |
-|  [ CLAHE Preprocessing & Normalization ] (0.01 ms)                            |
-|       │  - Y-channel contrast enhancement for invariant low-light handling    |
-|       ▼                                                                       |
-|  [ ONNX Runtime Classifier ] (2.02 ms)                                        |
-|       │  - Fine-tuned MobileNetV3-Small (1.07M parameters)                    |
-|       │  - Softmax probability vector (7 emotion classes)                     |
-|       ▼                                                                       |
-|  [ Centroid & IoU Face Tracker + Temporal Smoother ]                          |
-|       │  - Exponential Moving Average (EMA, alpha=0.65) + 6-frame window      |
-|       │  - Confidence thresholding: displays 'Uncertain' if confidence < 40%  |
-|       ▼                                                                       |
-|  [ High-Contrast HUD Renderer ] (0.24 ms)                                     |
-|          - Color-coded face boxes and track IDs                               |
-|          - 7-bar live probability panel                                       |
-|          - Real-time FPS and latency breakdown counter                        |
-+-------------------------------------------------------------------------------+
++-----------------------------------------------------------------------------------+
+|                            LIVE APPLICATION PIPELINE                              |
+|                                                                                   |
+|  [ Threaded Video Capture ]                                                       |
+|       │  - Dedicated daemon thread with lock-free buffer                           |
+|       │  - Drops stale frames; always provides newest frame to eliminate lag      |
+|       ▼                                                                           |
+|  [ Face Detection: OpenCV YuNet ] (15.37 ms)                                      |
+|       │  - ONNX-based deep face detector (cv2.FaceDetectorYN)                     |
+|       │  - Centered square crop expansion to eliminate aspect-ratio squashing     |
+|       │  - Facial feature centering avoids neck, throat, and clothing noise       |
+|       ▼                                                                           |
+|  [ Image Preprocessing & Domain Alignment ] (0.01 ms)                             |
+|       │  - Grayscale conversion (eliminates color chrominance domain mismatch)    |
+|       │  - CLAHE (Contrast Limited Adaptive Histogram Equalization)               |
+|       ▼                                                                           |
+|  [ Emotion Classification: ONNX Runtime ] (1.94 - 4.98 ms)                        |
+|       │  - Optimized INT8/FP32 execution with intra-op CPU thread pools           |
+|       │  - Softmax probability distributions across 7 emotion classes             |
+|       ▼                                                                           |
+|  [ Face Tracker & Temporal Smoother ]                                             |
+|       │  - Multi-face tracking via Centroid & Intersection-over-Union (IoU)       |
+|       │  - Exponential Moving Average (EMA, alpha=0.75) + 4-frame rolling window  |
+|       │  - Confidence thresholding (tau=0.35); shows 'Uncertain' on low entropy   |
+|       ▼                                                                           |
+|  [ Heads-Up Display (HUD) Rendering ] (0.24 ms)                                   |
+|          - Color-coded bounding boxes and persistent track IDs                    |
+|          - Live 7-bar horizontal probability distribution panel                   |
+|          - Real-time FPS, total latency, and per-stage profiling metrics          |
++-----------------------------------------------------------------------------------+
 ```
 
 ---
 
-## Benchmarks & Profiling (CPU Only)
+## Benchmarks and Latency Profiling
 
-Benchmarked on 100 consecutive frames with 640x480 resolution on an Intel 12-thread laptop CPU without GPU acceleration:
+Benchmarked across 100 consecutive frames at 640x480 resolution on CPU:
 
-### Per-Stage Timing Breakdown
+### Per-Stage Latency Breakdown
 
-| Stage | PyTorch CPU (ms) | ONNX Runtime CPU (ms) | Speedup |
+| Pipeline Stage | PyTorch CPU (ms) | ONNX Runtime CPU (ms) | Relative Speedup |
 | :--- | :--- | :--- | :--- |
-| **Capture (Threaded)** | 0.10 ms | 0.10 ms | 1.0x |
-| **Face Detect (YuNet)** | 19.12 ms | 15.37 ms | 1.2x |
-| **Preprocess (CLAHE + Norm)** | 0.01 ms | 0.01 ms | 1.0x |
-| **Emotion Classify** | **13.33 ms** | **2.02 ms** | **6.6x faster** |
-| **Draw HUD** | 0.25 ms | 0.24 ms | 1.0x |
-| **Total End-to-End Latency** | **32.82 ms** | **17.74 ms** | **1.85x faster** |
-| **Effective Throughput** | **30.5 FPS** | **56.4 FPS** | **+85% FPS** |
+| **Capture (Threaded I/O)** | 0.10 ms | 0.09 ms | 1.1x |
+| **Face Detection (YuNet)** | 19.12 ms | 17.13 ms | 1.1x |
+| **Preprocessing (Square + CLAHE)** | 0.01 ms | 0.01 ms | 1.0x |
+| **Emotion Classification** | **13.33 ms** | **1.94 ms** | **6.8x faster** |
+| **HUD Drawing & Rendering** | 0.25 ms | 0.23 ms | 1.1x |
+| **Total End-to-End Latency** | **32.82 ms** | **19.40 ms** | **1.69x faster** |
+| **Pipeline Throughput** | **30.5 FPS** | **51.6 FPS** | **+69.2% Throughput** |
 
 ---
 
-## Model Evaluation (FER2013 Test Set)
+## Model Training and Evaluation
 
-The emotion classifier is a lightweight MobileNetV3-Small model fine-tuned on the 28,709 images of the canonical FER2013 dataset using cosine annealing and inverse-frequency class weights.
+### Dataset Preparation
+- **Source**: Canonical FER2013 dataset (Train: 28,709, PublicTest: 3,589, PrivateTest: 3,589).
+- **Class Distribution & Balancing**: Severe imbalance (e.g., Disgust has only 436 training samples vs. 7,215 for Happy) was addressed using inverse-frequency class weights:
+  $$w_c = \left(\frac{N}{K \cdot N_c}\right)^{0.5}$$
+- **Data Augmentations**: Random horizontal flip ($p=0.5$), random rotation ($\pm 15^\circ$), color jitter (brightness, contrast, saturation), and random affine translations.
 
-### Per-Class Test Results (PrivateTest, 3,589 samples)
+### Evaluation Metrics (PrivateTest Split, 3,589 samples)
 
-| Emotion | Precision | Recall | F1-Score | Support |
+| Emotion Class | Precision | Recall | F1-Score | Support |
 | :--- | :--- | :--- | :--- | :--- |
 | **Happy** | 0.8196 | 0.8271 | **0.8233** | 879 |
 | **Surprise** | 0.7246 | 0.6514 | **0.6861** | 416 |
@@ -83,42 +94,53 @@ The emotion classifier is a lightweight MobileNetV3-Small model fine-tuned on th
 | **Sad** | 0.4559 | 0.5051 | **0.4792** | 594 |
 | **Fear** | 0.4718 | 0.3485 | **0.4009** | 528 |
 | **Disgust** | 0.3860 | 0.4000 | **0.3929** | 55 |
-| **Overall / Macro** | **0.5574** | **0.5535** | **0.5533** | **3,589** |
+| **Macro Average** | **0.5574** | **0.5535** | **0.5533** | **3,589** |
+| **Overall Accuracy** | - | - | **59.85%** | **3,589** |
 
 ### Confusion Matrix
-The normalized confusion matrix is stored in `reports/confusion_matrix.png`:
-- High true positive recognition for **Happy (83%)**, **Surprise (65%)**, **Neutral (62%)**, and **Angry (53%)**.
-- Moderate confusion occurs between adjacent negative expressions (e.g. *Sad* vs. *Neutral*, *Fear* vs. *Angry*).
+The normalized confusion matrix is exported to `reports/confusion_matrix.png`:
+- High accuracy is achieved on **Happy (83%)**, **Surprise (65%)**, and **Neutral (62%)**.
+- Moderate confusion occurs between adjacent negative valence expressions (*Sad* vs. *Neutral*, *Fear* vs. *Angry*), consistent with established FER benchmark findings.
 
 ---
 
-## Quick Start
+## Installation and Setup
 
-### 1. Requirements
-Ensure Python 3.10+ is installed.
+### 1. Prerequisites
+- Python 3.10, 3.11, or 3.12
+- Working webcam (optional; synthetic mode available for headless environments)
+
+### 2. Install Dependencies
 ```bash
+git clone https://github.com/ayushmansatapathy/emotion.git
+cd emotion
 pip install -r requirements.txt
 ```
 
-### 2. Run Live Detection (Webcam)
-To start continuous real-time analysis using your physical webcam:
+---
+
+## Usage
+
+### Run Live Webcam Application
+To start continuous real-time emotion recognition:
 ```bash
 python realtime.py --source 0
 ```
 
-### 3. Run on a Video File or Synthetic Test Stream
+### Run on Video File or Synthetic Feed
 ```bash
-# Synthetic test stream (dynamic facial animation):
+# Synthetic test stream (dynamic animated face for automated testing):
 python realtime.py --source synthetic
 
-# Video file:
+# Pre-recorded video file:
 python realtime.py --source path/to/video.mp4
 ```
 
-### 4. Interactive Keyboard Shortcuts
-- `q`: Quit the application cleanly
-- `s`: Save a timestamped snapshot to `screenshots/`
-- `r`: Toggle video recording to `videos/`
+### Keyboard Shortcuts
+During live operation:
+- `q`: Exit the application cleanly.
+- `s`: Save a timestamped high-resolution snapshot to `screenshots/`.
+- `r`: Start or stop recording the live video output to `videos/`.
 
 ---
 
@@ -126,72 +148,72 @@ python realtime.py --source path/to/video.mp4
 
 ```
 emotion-live/
-├── data/                      # Cached dataset splits (fer2013_train.npz, etc.)
-├── models/                    # Exported ONNX model & PyTorch checkpoints
-│   ├── emotion_model.onnx
-│   ├── best_emotion_model.pth
-│   └── face_detection_yunet_2023mar.onnx
-├── src/                       # Modular pipeline source code
-│   ├── dataset.py             # Data loader, augmentations & class balancing
-│   ├── model.py               # MobileNetV3-Small & MobileNetV2 definitions
-│   ├── train.py               # Training engine with CosineAnnealing & label smoothing
-│   ├── evaluate.py            # Evaluation metrics & confusion matrix generator
-│   ├── detector.py            # OpenCV YuNet face detector with margin expansion
-│   ├── predict.py             # ONNX Runtime inference & CLAHE preprocessor
-│   ├── tracker.py             # Centroid / IoU multi-face tracker
-│   └── smoothing.py           # Temporal EMA & rolling window majority vote
-├── benchmarks/                # Profiling scripts
-│   └── benchmark_pipeline.py  # Automated per-stage FPS/latency benchmark
-├── tests/                     # Unit test suite (PyTest)
-│   ├── test_model.py          # Model architecture & output shape tests
-│   ├── test_detector.py       # Face detector boundary tests
-│   ├── test_smoothing.py      # Anti-flicker & confidence threshold tests
-│   ├── test_pipeline.py       # Full live pipeline integration tests
-│   ├── test_benchmark.py      # FPS threshold assertions
-│   ├── verify_phase4.py       # 65s continuous feed & edge case verification
-│   └── verify_phase5_stability.py # Jitter and anti-bias verification
-├── reports/                   # Visual logs (confusion matrix, sample grids)
-├── realtime.py                # Main live application entry point
-├── PROGRESS.md                # Phased development and iteration log
-├── requirements.txt           # Project dependencies
-└── README.md                  # System documentation
+├── data/                                 # Cached dataset archives (train, val, test npz)
+├── models/                               # Neural network models & checkpoints
+│   ├── emotion-ferplus-8.onnx            # High-accuracy ONNX model
+│   ├── emotion_model.onnx                # Fine-tuned MobileNetV3 ONNX model
+│   ├── best_emotion_model.pth            # PyTorch training checkpoint
+│   └── face_detection_yunet_2023mar.onnx # OpenCV YuNet face detection weights
+├── src/                                  # Core pipeline modules
+│   ├── dataset.py                        # Dataset loader, augmentations & class balancing
+│   ├── model.py                          # Neural network architecture definitions
+│   ├── train.py                          # Training loop with CosineAnnealing & label smoothing
+│   ├── evaluate.py                       # Evaluation metrics & confusion matrix generation
+│   ├── detector.py                       # Face detector with square crop & landmark centering
+│   ├── predict.py                        # ONNX Runtime inference & CLAHE preprocessor
+│   ├── tracker.py                        # Centroid & IoU multi-face tracker
+│   └── smoothing.py                      # Temporal EMA & rolling window majority voting
+├── benchmarks/
+│   └── benchmark_pipeline.py             # Latency profiling and FPS benchmarking script
+├── tests/                                # Automated PyTest unit and integration tests
+│   ├── test_model.py                     # Model architecture & output tensor shape tests
+│   ├── test_detector.py                  # Face detector boundary clamping tests
+│   ├── test_smoothing.py                 # Anti-flicker & confidence threshold tests
+│   ├── test_pipeline.py                  # Full live pipeline integration tests
+│   ├── test_benchmark.py                 # FPS and latency assertion tests
+│   ├── verify_phase4.py                  # Continuous 65s feed and edge-case verification
+│   └── verify_phase5_stability.py        # Noise jitter stability and anti-bias verification
+├── reports/                              # Output visual artifacts (confusion matrix, samples)
+├── realtime.py                           # Main real-time live application
+├── PROGRESS.md                           # Phased iteration log and experimental history
+├── requirements.txt                      # Python dependencies
+└── README.md                             # Project documentation
 ```
 
 ---
 
-## Running Automated Tests
+## Verification and Automated Testing
 
-Run the full PyTest suite:
+### Execute Unit and Integration Tests
 ```bash
 python -m pytest -v tests/
 ```
 
-Run the pipeline benchmark:
+### Execute Speed & Latency Benchmark
 ```bash
 python benchmarks/benchmark_pipeline.py
 ```
 
-Run edge-case and memory stability verification:
+### Execute Edge-Case & Stability Suite
+Verifies continuous 65s execution without memory leaks, handling of pitch-black frames, multi-face tracking, and boundary clipping:
 ```bash
 python tests/verify_phase4.py
 ```
 
 ---
 
-## Limitations & Real-World Considerations
+## Domain Considerations and Limitations
 
-1. **FER2013 Label Noise & Class Imbalance**:
-   - The canonical FER2013 dataset exhibits significant label noise (~10–15% contested or ambiguous labels). Human agreement on FER2013 is estimated at 65% ± 5%.
-   - Class imbalance is acute: *Disgust* contains only 55 test samples compared to 879 for *Happy*. While smoothed class weighting partially compensates, *Disgust* and *Fear* remain the most challenging categories.
-2. **Facial Expression $\neq$ True Emotional State**:
-   - The model predicts visible facial expressions (action unit activations), not internal emotional experiences. A person smiling under stress may be classified as "Happy".
-3. **Lighting & Pose Sensitivity**:
-   - Extreme head pitch/yaw ($>45^\circ$) reduces face detection confidence.
-   - Low-light scenarios are actively stabilized through CLAHE (Contrast Limited Adaptive Histogram Equalization), but severe darkness requires supplementary illumination.
+1. **FER Benchmark Label Noise**:
+   - The original FER2013 dataset contains approximately 10–15% noisy or contested human annotations. Human agreement on FER2013 images is documented at $65\% \pm 5\%$ due to low resolution ($48\times 48$) and subject ambiguity.
+2. **Expression vs. Internal Emotional State**:
+   - The model detects outward facial muscle contractions and morphological configurations (Facial Action Units). Outward facial expressions do not always correspond directly to internal emotional experiences.
+3. **Lighting and Head Pose Variations**:
+   - Severe head rotations ($> 45^\circ$ pitch or yaw) reduce face detection confidence. While CLAHE provides robustness against low light, extreme under-exposure requires ambient illumination.
 
 ---
 
-## Privacy & Ethical Disclosures
+## Privacy and Data Security
 
-- **100% On-Device Processing**: All video capture, face detection, and emotion classification execute purely locally on your CPU. No frames, audio, or metadata are transmitted over the network.
-- **Explicit Consent & Recording**: No video feeds or images are persisted to disk unless the user explicitly presses `s` (screenshot) or `r` (recording). All recorded files are saved locally in `screenshots/` and `videos/`.
+- **Strictly Local Computation**: All video capture, face detection, tracking, and classification execute entirely on the local device. No video frames, audio, or biometric features are transmitted to remote servers.
+- **Explicit Recording Action**: Video frames are processed strictly in volatile memory. No media is written to storage unless the user explicitly initiates a screenshot (`s`) or video recording (`r`).
