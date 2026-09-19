@@ -4,6 +4,7 @@ import time
 import threading
 import queue
 import argparse
+from typing import Optional, List, Dict, Tuple
 import cv2
 import numpy as np
 
