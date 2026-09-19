@@ -132,21 +132,25 @@ class RealtimeEmotionApp:
     """
     def __init__(self,
                  source=0,
-                 model_path='models/emotion_model.onnx',
+                 model_path='models/emotion-ferplus-8.onnx',
                  yunet_path='models/face_detection_yunet_2023mar.onnx',
                  use_onnx=True,
-                 conf_threshold=0.40,
+                 conf_threshold=0.35,
                  classify_every_n=1):
+        # Fallback to emotion_model.onnx if ferplus not available
+        if not os.path.exists(model_path) and os.path.exists('models/emotion_model.onnx'):
+            model_path = 'models/emotion_model.onnx'
+
         self.source = source
         self.model_path = model_path
         self.use_onnx = use_onnx
         self.conf_threshold = conf_threshold
         self.classify_every_n = classify_every_n
 
-        print("[App] Initializing face detector...")
+        print(f"[App] Initializing face detector ({yunet_path})...")
         self.detector = FaceDetector(model_path=yunet_path, conf_threshold=0.55)
 
-        print("[App] Initializing emotion classifier...")
+        print(f"[App] Initializing emotion classifier ({model_path})...")
         self.predictor = EmotionPredictor(
             model_path=model_path,
             use_onnx=use_onnx,
@@ -158,8 +162,8 @@ class RealtimeEmotionApp:
         self.tracker = FaceTracker(
             classes=EMOTION_CLASSES,
             confidence_threshold=conf_threshold,
-            window_size=6,
-            ema_alpha=0.65
+            window_size=4,
+            ema_alpha=0.75
         )
 
         self.camera = ThreadedCamera(source=source)
@@ -354,9 +358,9 @@ class RealtimeEmotionApp:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', default='0', help='Camera index (0), video file path, or "synthetic"')
-    parser.add_argument('--model', default='models/emotion_model.onnx', help='Path to ONNX or PyTorch model')
+    parser.add_argument('--model', default='models/emotion-ferplus-8.onnx', help='Path to ONNX or PyTorch model')
     parser.add_argument('--pytorch', action='store_true', help='Use PyTorch instead of ONNX Runtime')
-    parser.add_argument('--conf-thresh', type=float, default=0.40, help='Confidence threshold for Uncertain state')
+    parser.add_argument('--conf-thresh', type=float, default=0.35, help='Confidence threshold for Uncertain state')
     parser.add_argument('--duration', type=float, default=None, help='Auto-stop after N seconds (for testing)')
     parser.add_argument('--no-display', action='store_true', help='Run headless without cv2.imshow')
     args = parser.parse_args()

@@ -5,18 +5,13 @@ from typing import List, Dict, Tuple, Optional
 class EmotionSmoother:
     """
     Temporal smoother for emotion probabilities and labels.
-    Prevents jitter and flickering between adjacent frames.
-    
-    Features:
-    - Exponential Moving Average (EMA) of class probability vectors
-    - Rolling window majority voting & probability averaging
-    - Confidence thresholding: returns 'Uncertain' if top probability < threshold
+    Prevents jitter while ensuring high responsiveness to expression changes.
     """
     def __init__(self,
                  classes: List[str],
-                 window_size: int = 5,
-                 ema_alpha: float = 0.65,
-                 confidence_threshold: float = 0.40):
+                 window_size: int = 4,
+                 ema_alpha: float = 0.75,
+                 confidence_threshold: float = 0.35):
         self.classes = classes
         self.num_classes = len(classes)
         self.window_size = window_size
@@ -57,7 +52,6 @@ class EmotionSmoother:
 
         # 3. Compute window-averaged probabilities
         smoothed_probs = np.mean(self.history, axis=0)
-        # Re-normalize to sum to 1.0
         smoothed_probs = smoothed_probs / (np.sum(smoothed_probs) + 1e-7)
 
         top_idx = int(np.argmax(smoothed_probs))
@@ -73,5 +67,4 @@ class EmotionSmoother:
         return self.current_label, self.current_confidence, smoothed_probs
 
     def get_probabilities_dict(self, probs: np.ndarray) -> Dict[str, float]:
-        """Convert probability vector to a dictionary of emotion: probability."""
         return {cls_name: float(p) for cls_name, p in zip(self.classes, probs)}

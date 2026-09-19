@@ -8,27 +8,29 @@ from src.dataset import EMOTION_CLASSES
 
 class EmotionPredictor:
     """
-    High-speed emotion inference engine using ONNX Runtime or PyTorch.
-    Handles image preprocessing (CLAHE contrast equalization, resizing, normalization)
-    and outputs probabilities across all 7 emotion classes.
+    High-performance, domain-aligned Emotion Predictor.
+    Supports both FER+ ONNX (64x64 Grayscale) and custom MobileNetV3 (112x112).
+    Ensures input is strictly preprocessed in the grayscale domain matching FER datasets,
+    with CLAHE contrast enhancement for real-world webcam lighting variations.
     """
     def __init__(self,
-                 model_path: str = 'models/emotion_model.onnx',
-                 img_size: int = 112,
+                 model_path: str = 'models/emotion-ferplus-8.onnx',
                  use_onnx: bool = True,
                  use_clahe: bool = True,
                  num_threads: int = 4):
+        # Fallback to emotion_model.onnx if ferplus not present
+        if not os.path.exists(model_path):
+            if os.path.exists('models/emotion_model.onnx'):
+                model_path = 'models/emotion_model.onnx'
+            elif os.path.exists('models/best_emotion_model.pth'):
+                model_path = 'models/best_emotion_model.pth'
+                use_onnx = False
+
         self.model_path = model_path
-        self.img_size = img_size
         self.use_onnx = use_onnx
         self.use_clahe = use_clahe
-        self.classes = EMOTION_CLASSES
+        self.classes = EMOTION_CLASSES  # ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
 
-        # Preprocessing normalization constants (ImageNet)
-        self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
-        self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
-
-        # CLAHE for low-light enhancement
         self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
         if use_onnx:
@@ -40,7 +42,15 @@ class EmotionPredictor:
             self.session = ort.InferenceSession(model_path, sess_options=opts, providers=['CPUExecutionProvider'])
             self.input_name = self.session.get_inputs()[0].name
             self.output_name = self.session.get_outputs()[0].name
+            self.input_shape = self.session.get_inputs()[0].shape
+
+            # Detect whether model expects 64x64 Grayscale (FER+) or 112x112 RGB (MobileNet)
+            self.is_ferplus = (len(self.input_shape) == 4 and self.input_shape[1] == 1 and self.input_shape[2] == 64)
+            # FER+ 8-class indices: 0: neutral, 1: happiness, 2: surprise, 3: sadness, 4: anger, 5: disgust, 6: fear, 7: contempt
+            # Mapped to target: ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+            self.ferplus_map = [4, 5, 6, 1, 3, 2, 0]
         else:
+            self.is_ferplus = False
             from src.model import build_model
             self.model = build_model('mobilenet_v3_small', 7, pretrained=False)
             ckpt = torch.load(model_path, map_location='cpu', weights_only=True)
@@ -50,41 +60,50 @@ class EmotionPredictor:
                 self.model.load_state_dict(ckpt)
             self.model.eval()
 
+        self.mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
+        self.std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
+
     def preprocess_crop(self, face_bgr: np.ndarray) -> np.ndarray:
         """
-        Preprocess a face crop:
-        1. Optional CLAHE on luminance (Y channel in YCrCb)
-        2. Convert BGR to RGB
-        3. Resize to model input size
-        4. Normalize
-        Returns: (3, H, W) float32 array
+        Preprocess face crop into model-ready tensor format.
+        Preserves square geometry, converts to Grayscale with CLAHE.
         """
         if face_bgr is None or face_bgr.size == 0:
-            return np.zeros((3, self.img_size, self.img_size), dtype=np.float32)
+            target_dim = 64 if self.is_ferplus else 112
+            channels = 1 if self.is_ferplus else 3
+            return np.zeros((channels, target_dim, target_dim), dtype=np.float32)
 
-        # 1. CLAHE if enabled
+        # 1. Convert to Grayscale
+        if len(face_bgr.shape) == 3:
+            gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = face_bgr
+
+        # 2. Apply CLAHE contrast enhancement
         if self.use_clahe:
-            ycrcb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2YCrCb)
-            ycrcb[:, :, 0] = self.clahe.apply(ycrcb[:, :, 0])
-            face_bgr = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+            gray = self.clahe.apply(gray)
 
-        # 2. Convert to RGB
-        face_rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
+        # 3. Square crop guarantee
+        h, w = gray.shape
+        side = min(h, w)
+        cx, cy = w // 2, h // 2
+        square = gray[max(0, cy - side//2):min(h, cy + side//2), max(0, cx - side//2):min(w, cx + side//2)]
 
-        # 3. Resize
-        resized = cv2.resize(face_rgb, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
-
-        # 4. Normalize to float [0, 1] then standardize
-        normalized = (resized.astype(np.float32) / 255.0 - self.mean) / self.std
-
-        # Transpose to (3, H, W)
-        tensor_img = np.transpose(normalized, (2, 0, 1))
-        return tensor_img
+        if self.is_ferplus:
+            # FER+ expects (1, 64, 64) float32
+            resized = cv2.resize(square, (64, 64), interpolation=cv2.INTER_AREA).astype(np.float32)
+            return resized.reshape(1, 64, 64)
+        else:
+            # MobileNet expects (3, 112, 112) normalized float32
+            resized_gray = cv2.resize(square, (112, 112), interpolation=cv2.INTER_LINEAR)
+            rgb = cv2.cvtColor(resized_gray, cv2.COLOR_GRAY2RGB)
+            normalized = (rgb.astype(np.float32) / 255.0 - self.mean) / self.std
+            return np.transpose(normalized, (2, 0, 1))
 
     def predict_crops(self, crops_bgr: List[np.ndarray]) -> List[np.ndarray]:
         """
-        Batch inference on a list of cropped BGR face images.
-        Returns: List of probability vectors (shape [7] for each face).
+        Batch inference on face crops.
+        Returns: List of 7-class probability vectors [angry, disgust, fear, happy, sad, surprise, neutral].
         """
         if not crops_bgr:
             return []
@@ -92,18 +111,28 @@ class EmotionPredictor:
         batch_tensors = np.stack([self.preprocess_crop(c) for c in crops_bgr], axis=0)
 
         if self.use_onnx:
-            logits = self.session.run([self.output_name], {self.input_name: batch_tensors})[0]
+            raw_out = self.session.run([self.output_name], {self.input_name: batch_tensors})[0]
+            if self.is_ferplus:
+                results = []
+                for logits in raw_out:
+                    exp = np.exp(logits - np.max(logits))
+                    probs_8 = exp / np.sum(exp)
+                    # Map to 7 classes
+                    probs_7 = np.array([probs_8[idx] for idx in self.ferplus_map], dtype=np.float32)
+                    probs_7 /= np.sum(probs_7)
+                    results.append(probs_7)
+                return results
+            else:
+                logits = raw_out
         else:
             with torch.no_grad():
                 logits = self.model(torch.from_numpy(batch_tensors)).numpy()
 
-        # Softmax over class logits
         exp_logits = np.exp(logits - np.max(logits, axis=1, keepdims=True))
         probs = exp_logits / np.sum(exp_logits, axis=1, keepdims=True)
         return [probs[i] for i in range(len(crops_bgr))]
 
     def predict_single(self, crop_bgr: np.ndarray) -> Tuple[str, float, np.ndarray]:
-        """Convenience method for single face crop."""
         probs = self.predict_crops([crop_bgr])[0]
         top_idx = int(np.argmax(probs))
         return self.classes[top_idx], float(probs[top_idx]), probs
