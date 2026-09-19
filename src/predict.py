@@ -111,7 +111,17 @@ class EmotionPredictor:
         batch_tensors = np.stack([self.preprocess_crop(c) for c in crops_bgr], axis=0)
 
         if self.use_onnx:
-            raw_out = self.session.run([self.output_name], {self.input_name: batch_tensors})[0]
+            # Handle models with fixed batch size 1 (e.g. FER+ has shape [1, 1, 64, 64])
+            if isinstance(self.input_shape[0], int) and self.input_shape[0] == 1 and len(batch_tensors) > 1:
+                outs = []
+                for single_tensor in batch_tensors:
+                    single_batch = np.expand_dims(single_tensor, axis=0)
+                    out = self.session.run([self.output_name], {self.input_name: single_batch})[0]
+                    outs.append(out[0])
+                raw_out = np.array(outs)
+            else:
+                raw_out = self.session.run([self.output_name], {self.input_name: batch_tensors})[0]
+
             if self.is_ferplus:
                 results = []
                 for logits in raw_out:
